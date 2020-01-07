@@ -1,0 +1,235 @@
+---
+title: "Particle Filtering"
+author: "Luis Alvarez"
+date: "29/05/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Hidden Markov Models
+
+Suppose a researcher has access to a sample $\{Y_t\}_{t=1}^T$, and that he believes this is driven by an underlying state $\{X_t\}_{t=1}^T$. Define $X_{1:n} :=  (X_1, X_2 \ldots X_n)$.  We will study a class of models given by:
+
+\begin{align}
+  X_1 \sim \mu(X_1)\\
+  X_t| X_{1:t-1} \overset{\text{dist}}{=} X_t|X_{t-1} \sim f(X_t|X_{t-1}) \\
+  Y_{1:t}|X_{1:t} \sim \prod_{i=1}^t g(Y_i|X_i)
+\end{align}
+
+Equation (2) imposes a Markovian structure in the unobserved state. Equation (3) implies signals
+are independent, conditional on underlying states, and that their distribution depends only on the current state.
+
+Note that this model nests the Kalman filter you've seen in class. In this case, conditional distributions have closed-form expressions. This will not be the case in general. We will consider the following example.
+
+### Stochastic volatility model
+We consider the following model
+
+\begin{align}
+X_t = \alpha X_{t-1} + \sigma V_t \\
+Y_t = \beta \exp\left(\frac{X_t}{2}\right) W_t \\
+X_1 \sim \mathcal{N}\left(0, \frac{\sigma^2}{1-\alpha^2}\right) \\
+
+\{V_t,W_t\}_{t\geq 1} \text{ independent standard Gaussian}
+\end{align}
+
+Observe that, in this case:
+
+\begin{align}
+  X_t|X_{t-1} \sim \mathcal{N}\left(\alpha X_{t-1}, \sigma^2 \right) \\
+  Y_t|X_t \sim \mathcal{N}\left(0, \beta^2 \exp\left(X_t\right) \right)
+\end{align}
+
+
+```{r stochastic_volatility}
+#Removes previously loaded objects
+rm(list=ls())
+
+#Sets seed to allow for replication
+set.seed(747)
+
+#Function to generate a sample from the stochastic volatility model, given parameters, for T0
+#periods
+gen_stoch_vol <- function(alpha, beta, sigma, T0)
+{
+  X = rnorm(1, mean = 0, sd = sigma/sqrt(1-alpha^2) )
+  for(t in 1:(T0-1))
+    X = c(X, rnorm(1, mean = alpha*X[t], sd = sigma))
+  Y = beta*exp(X/2)*rnorm(T0, mean = 0, sd = 1)
+  return(list("signal" = Y, "state" = X))
+}
+
+#Parameter values
+alpha = 0.91
+sigma = 1
+beta = 0.5
+T0 = 1000
+
+#Sample
+data = gen_stoch_vol(alpha, beta, sigma, T0)
+
+plot(1:T0, data$state, type = "l", col = "red", ylim =c(min(data$state, data$signal), max(data$state, data$signal)))
+lines(1:T0, data$signal, col = "blue")
+legend("bottomleft", legend = c("State (unobserved)", "Signal"),  col = c("red","blue"),lty = c(1,1))
+```
+
+## Particle Filtering
+Suppose we are interested in $p(Y_{1:n}|X_{1:n})$. Observe that, under our assumptions, we have:
+
+\begin{align}
+p(Y_{1:n},X_{1:n}) = p(Y_{1:n-1},X_{1:n-1})\cdot p(Y_{n}, X_{n}|Y_{1:n-1},X_{1:n-1}) = \\ p(Y_{1:n-1},X_{1:n-1})\cdot p(X_{n}| Y_{1:n-1}, X_{1:n-1}) \cdot p(Y_{n}|Y_{1:n-1}, X_{1:n}) = \\
+p(Y_{1:n-1},X_{1:n-1})\cdot f(X_{n}| X_{n-1}) \cdot g(Y_{n}|X_{n})
+\end{align}
+
+thus
+
+\begin{align}
+p(X_{1:n}|Y_{1:n})=\frac{p(Y_{1:n-1},X_{1:n-1})\cdot f(X_{n}| X_{n-1}) \cdot g(Y_{n}|X_{n})}{p(Y_{1:n})} =\frac{p(X_{1:n-1}|Y_{1:n-1})\cdot f(X_{n}| X_{n-1}) \cdot g(Y_{n}|X_{n})}{p(Y_{n}|Y_{1:n-1})}
+\end{align}
+
+where
+$$p(Y_{n}|Y_{1:n-1}) = \int p(Y_{n},X_{1:n-1}|Y_{1:n-1})  d X_{1:n-1} = \int p(X_{1:n-1}|Y_{1:n-1})\cdot f(X_{n}| X_{n-1}) \cdot g(Y_{n}|X_{n}) d X_{1:n-1} $$
+In Bayesian analysis, we are interested in evaluating the likelihood. This can be done recursively by noticing that:
+
+$$p(Y_{1:n}) = p(Y_1) \prod_{i=2}^n p(Y_{i}|Y_{1:i-1})$$
+the difficult thing here is the integral, which is required in each step of the recursion. Particle filtering is a methodology that aims at computing approximations of this difficult likelihood.
+
+In fact, we can put our problem in a broader perspective. Suppose we want to evaluate:
+
+$$\pi(x_{1:n}) = \frac{\gamma_n (x_{1:n})}{Z_n}$$
+where we are _able to evaluate_ $\gamma_n(x_{1:n})$; and we have $Z_n = \int \gamma_n(x_{1:n}) d x_{1:n}$
+(what are these quantities in the Markov model?). Particle filtering (or SMC) will provide
+an approximation of $\pi(x_{1:n})$ and an estimate of $Z_n$.
+
+### Sequential Importance Sampling
+
+Even if we cannot draw from $\gamma_n$, you've learned in class to compute $Z_n$ by importance sampling (choose a density which support contains $\text{supp} \gamma_n$). The problem here is that, for each $n \in \{1,2\ldots T\}$, you'd have to compute $S$ draws of an increasingly larger vector if standard importance sampling were applied. An alternative is sequential importance sampling. 
+
+The idea is to use a proposal which can be factored, i.e. $q_n(x_{1:n}) = q_{n-1}(x_{1:n-1})q_n(x_n|x_{1:n-1})$. In this case, weights attached to each draw will be given by:
+
+\begin{equation}
+\begin{aligned} w_{n}\left(x_{1 : n}\right) &=\frac{\gamma_{n}\left(x_{1 : n}\right)}{q_{n}\left(x_{1 : n}\right)} \\ &=\frac{\gamma_{n-1}\left(x_{1 : n-1}\right)}{q_{n-1}\left(x_{1 : n-1}\right)} \frac{\gamma_{n}\left(x_{1 : n}\right)}{\gamma_{n-1}\left(x_{1 : n-1}\right) q_{n}\left(x_{n} | x_{1 : n-1}\right)} \end{aligned}
+\end{equation}
+
+and we could write:
+
+\begin{equation}
+\begin{aligned} w_{n}\left(x_{1 : n}\right) &=w_{n-1}\left(x_{1 : n-1}\right) \cdot \alpha_{n}\left(x_{1 : n}\right) \\=& w_{1}\left(x_{1}\right) \prod_{k=2}^{n} \alpha_{k}\left(x_{1 : k}\right) \end{aligned}
+\end{equation}
+
+where 
+
+\begin{equation}
+\alpha_{n}\left(x_{1 : n}\right)=\frac{\gamma_{n}\left(x_{1 : n}\right)}{\gamma_{n-1}\left(x_{1 : n-1}\right) q_{n}\left(x_{n} | x_{1 : n-1}\right)}
+\end{equation}
+
+The algorithm is summarized below. 
+
+#### Sequential Importance Sampling Algorithm
+For simulations ranging from $s \in \{1,2,\ldots,S\}$:
+
+1. If $n=1$:
+  + Sample $X_1^s \sim q_1(\cdot)$
+  + Compute weights $w_1(X_1^s) = \frac{\gamma_1(X_1^s)}{q_1(X_1^s)}$
+2. If $n>1$:
+  + Sample $X_n^s \sim q_n(\cdot|X_{1:n-1}^s)$
+  + Compute weights $w_n(X_{1:n}^s) = \alpha_{n}\left(X_{1 :n}^s\right) \cdot w_{n-1}(X_{1:n-1}^s)$
+
+Define the normalized weights as:
+
+\begin{equation}
+W_{n}^{s}=\frac{w_{n}\left(X_{1 : n}^{s}\right)}{\sum_{j=1}^{S} w_{n}\left(X_{1 : n}^{j}\right)}
+\end{equation}
+
+at the end, we have the following approximations:
+
+\begin{equation}
+\begin{aligned} \widehat{\pi}_{n}\left(x_{1 : n}\right) &=\sum_{s=1}^{S} W_{n}^{s} \delta_{X_{1 : n}^{s}}\left(x_{1 : n}\right) \\ \widehat{Z}_{n} &=\frac{1}{S} \sum_{s=1}^{S} w_{n}\left(X_{1 : n}^{s}\right) \end{aligned}
+\end{equation}
+
+the empirical measure $\hat{\pi}_n$ can be used to compute moments.
+
+### Resampling
+
+Ok, we've seen how to reduce the computational toll of simulation through sequential importance sampling. For a fixed $n$, we can use the standard apparatus you've learned to infer that
+$\mathbb{E}_{\hat{\pi}_n}[h] = \frac{1}{S} \sum_{s=1}^S W_{n}^{s} h(X_{1 : n}^{s}) \overset{\text{p}}{\to} \int \gamma_n(x_{1:n}) f(x_{1:n}) d x_{1:n}$ as $S \to \infty$ for any $h$ with finite first moments with respect to $\gamma_n$. The problem is that, for a __fixed__ S, the approximation error increases as $n$ increases. How can we overcome this?
+
+The idea is to resample from $\hat{\pi}_n$ in order to remove low-weight particles. After we compute $\hat{\pi}_n$, we can draw new $S$ draws from $\hat{\pi}_n$ and compute a resulting empirical measure $\bar{\pi}_n$. This is equivalent to drawing weights $(S^s_n)_{s=1}^S$ from a multinomial distribution with parameters $S$ and $(W^s_n)_{s=1}^S$ and then computing.
+
+\begin{equation}
+\overline{\pi}_{n}\left(x_{1 : n}\right)=\sum_{s=1}^{S} \frac{S_{n}^{s}}{S} \delta_{X_{1 : n}^{s}}\left(x_{1 : n}\right)
+\end{equation}
+
+there are more refined methods to resample. Cf. the survey for details.
+
+### Sequential Monte Carlo
+
+Particle filtering alternates between SIC and Resampling. Here we outline the simplest algorithm:
+
+#### Sequential Monte Carlo Algorithm
+For each $n \in \{1,2,\ldots,T\}$:
+
+1. If $n=1$:
+ + For iterations $s \in \{1,2,\ldots, S\}$, draw $X_1^s \sim q_1(\cdot)$
+ + Compute the weights $w_1(X_1^s)$ and the normalized weights $W_1(X_1^s)$
+ + Resample from $\{W_1^s, X_1^s\}$ to obtain a resampled sample $\left\{\bar{W}_1^s = \frac{1}{S}, \bar{X}_1^s\right\}$
+2. If $n>1$:
+ + For iterations $s \in \{1,2,\ldots, S\}$, draw $X_{n}^s \sim q_1(\cdot|\bar{X}_{1:n-1}^s)$ and set $X_{1:n}^s := (\bar{X}_{1:n-1}^s, X_{n}^s)$
+ + Compute the weights $w_n(X_{1:n}^{s}) := \alpha_{n}\left(X_{1 :n}^{s}\right)$ and the normalized weights $W_{n}^{s}=\frac{w_{n}\left(X_{1 : n}^{s}\right)}{\sum_{j=1}^{S} w_{n}\left(X_{1 : n}^{j}\right)}$
++ Resample from $\{W_n^s, X_{1:n}^s\}$ to obtain a resampled sample $\left\{\bar{W}_n^s = \frac{1}{S}, \bar{X}_{1:n}^s\right\}$
+
+notice that the weights at each step do not depend on previous weights as in the original SIC. This is due to importance sampling.
+
+At each step, we have the following approximations to $\pi_n(x_{1:n})$:
+
+\begin{equation}
+\widehat{\pi}_{n}\left(x_{1 : n}\right)=\sum_{i=1}^{N} W_{n}^{i} \delta_{X_{1 : n}^{i}}\left(x_{1 : n}\right)
+\end{equation}
+
+\begin{equation}
+\overline{\pi}_{n}\left(x_{1 : n}\right)=\frac{1}{N} \sum_{i=1}^{N} \delta_{\overline{X}_{1 : n}^{i}}\left(x_{1 : n}\right)
+\end{equation}
+
+the former is to be preferred to the latter (why?).
+ 
+###Questions
+* How do we appy this to the context of the Hidden Markov Model previously discussed?
+* What are the approximations to the likelihood?
+* How can we use this to conduct inference?
+
+###Back to stochastic volatility 
+
+We will apply the model to compute the likelihood of the stochastic volatility model. Our proposals will be 
+
+$$ q_1(\cdot) \sim \mathcal{N}\left(0, \frac{\sigma^2}{1-\alpha^2}\right)$$
+$$q_n(\cdot|X_{1:n}^s) \sim \mathcal{N}\left(\alpha X_{t-1}, \sigma^2 \right)$$
+
+The function below computes the model log-likelihood
+
+```{r}
+#Page 19 of Doucet-Johansen
+particle_filter_likelihood <- function(signal, alpha, sigma, beta, S = 100)
+{
+  log_lkl = 0
+  for(t in 1:length(signal))
+  {
+  if(t==1)
+    X_t =rnorm(S,mean = 0, sd = sigma/sqrt(1-alpha^2)) else
+      X_t = rnorm(S,mean = alpha*X_t_1, sd = sigma)
+  
+    update_weight =dnorm(signal[t], mean = 0, sd = beta^2*exp(X_t/2))
+    
+    log_lkl = log_lkl + log(mean(update_weight))
+    
+    #print(update_weight)
+    #Resample
+    X_t_bar = sample(X_t, S, replace = T,  prob = update_weight)
+    X_t_1 = X_t_bar 
+    
+  }
+  return(log_lkl)
+}
+```
+
